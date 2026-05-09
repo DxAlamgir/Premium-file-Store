@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>Premium File Store – Digital Market</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <style>
+        * { font-family: 'Inter', sans-serif; }
+        body { background: #f8fafc; }
+        .navbar { background: white; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 1rem 2rem; }
+        .logo { font-weight: 800; font-size: 1.6rem; background: linear-gradient(135deg, #2563eb, #7c3aed); -webkit-background-clip: text; background-clip: text; color: transparent; }
+        .product-card { background: white; border-radius: 28px; overflow: hidden; transition: 0.2s; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.03); }
+        .product-card:hover { transform: translateY(-6px); box-shadow: 0 20px 30px -12px rgba(0,0,0,0.1); }
+        .product-img { height: 180px; object-fit: cover; width: 100%; }
+        .btn-primary { background: #2563eb; border: none; border-radius: 60px; padding: 8px 24px; }
+        .wallet-badge { background: #f1f5f9; padding: 6px 16px; border-radius: 40px; font-weight: 500; }
+        .dropdown-custom { position: absolute; top: 50px; right: 0; background: white; border-radius: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 260px; display: none; z-index: 1000; }
+        .nav-tabs .nav-link { color: #475569; border-radius: 40px; margin: 0 4px; }
+        .nav-tabs .nav-link.active { background: #2563eb; color: white; }
+        .rating-stars { color: #fbbf24; font-size: 0.9rem; }
+        .toast-notif { position: fixed; bottom: 20px; right: 20px; background: #1e293b; color: white; border-radius: 60px; padding: 12px 20px; z-index: 1100; display: none; }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div class="d-flex justify-content-center align-items-center vh-100">
+        <div class="spinner-border text-primary" role="status"></div>
+        <span class="ms-2">Loading...</span>
+    </div>
+</div>
+
+<script type="module">
+    // Firebase imports
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+    import { getDatabase, ref, set, get, update, push, onValue, query, orderByChild, equalTo, remove, runTransaction } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+    import { getMessaging, getToken, onMessage } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging.js";
+
+    const firebaseConfig = {
+        apiKey: "AIzaSyApq6Rf4cp6IbIIXdhJWaYSfX0HrYVkKKo",
+        authDomain: "rgfff-19a9e.firebaseapp.com",
+        databaseURL: "https://rgfff-19a9e-default-rtdb.firebaseio.com",
+        projectId: "rgfff-19a9e",
+        storageBucket: "rgfff-19a9e.firebasestorage.app",
+        appId: "1:969291045242:android:0c58df4785239d3e4f1ec3"
+    };
+
+    let app, auth, db, messaging = null;
+    try {
+        app = initializeApp(firebaseConfig);
+        auth = getAuth(app);
+        db = getDatabase(app);
+        messaging = getMessaging(app);
+    } catch(e) { console.error("Firebase init error", e); }
+
+    let currentUser = null;
+    let unsubscribeWallet = null;
+    let notifUnsub = null;
+
+    const showToast = (msg, icon="success") => Swal.fire({ toast:true, position:'top-end', icon, title:msg, showConfirmButton:false, timer:3000 });
+    const showDialog = (title, msg, icon="info") => Swal.fire({ title, text:msg, icon, confirmButtonColor:'#2563eb' });
+
+    async function createUserProfile(user) {
+        const userRef = ref(db, `users/${user.uid}`);
+        const snap = await get(userRef);
+        if(!snap.exists()) await set(userRef, { email:user.email, walletBalance:0, role:"user", createdAt:Date.now(), lastLogin:Date.now() });
+        else await update(userRef, { lastLogin:Date.now() });
+    }
+
+    async function handleLogin(email, password) {
+        try {
+            const cred = await signInWithEmailAndPassword(auth, email, password);
+            const userSnap = await get(ref(db, `users/${cred.user.uid}`));
+            if(userSnap.val()?.banned === true) { await signOut(auth); showDialog("Banned", "Your account is banned.", "error"); return false; }
+            showToast("Logged in!");
+            return true;
+        } catch(err) { showDialog("Login Failed", err.message, "error"); return false; }
+    }
+    async function handleRegister(email, password) {
+        try {
+            const cred = await createUserWithEmailAndPassword(auth, email, password);
+            await createUserProfile(cred.user);
+            showToast("Registered! Please login.");
+            return true;
+        } catch(err) { showDialog("Registration Failed", err.message, "error"); return false; }
+    }
+    async function logoutUser() { await signOut(auth); renderAuthScreen(); }
+
+    function attachWalletListener(uid) {
+        if(unsubscribeWallet) unsubscribeWallet();
+        const walletRef = ref(db, `users/${uid}/walletBalance`);
+        unsubscribeWallet = onValue(walletRef, (snap) => {
+            const balance = snap.val() ?? 0;
+            document.getElementById("walletBalanceDisplay")?.innerText = `₹${balance}`;
+            document.getElementById("profileWalletBalance")?.innerText = `₹${balance}`;
+            document.getElementById("walletBalanceLarge")?.innerText = `₹${balance}`;
+        });
+    }
+
+    async function loadProducts() {
+        const container = document.getElementById("productsContainer");
+        if(!container) return;
+        const productsSnap = await get(ref(db, 'products'));
+        let products = [];
+        if(productsSnap.exists()) {
+            Object.entries(productsSnap.val()).forEach(([id, p]) => products.push({ id, ...p }));
+        }
+        products.sort((a,b) => b.createdAt - a.createdAt);
+        if(products.length === 0) {
+            container.innerHTML = `<div class="col-12 text-center py-5">No products available. Check back later.</div>`;
+            return;
+        }
+        container.innerHTML = products.map(p => `
+            <div class="col-md-4 col-lg-3 mb-4">
+                <div class="product-card h-100" data-id="${p.id}">
+                    <img src="${p.photoUrl || 'https://placehold.co/400x300?text=No+Image'}" class="product-img">
+                    <div class="p-3">
+                        <h6 class="fw-bold">${escapeHtml(p.name)}</h6>
+                        <div class="rating-stars mb-1">${renderStars(p.avgRating || 0)} (${p.ratingCount || 0})</div>
+                        <div class="d-flex justify-content-between align-items-center mt-2">
+                            <span class="fw-bold text-primary">₹${p.price}</span>
+                            <button class="btn btn-sm btn-outline-primary view-detail" data-id="${p.id}">Details</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+        document.querySelectorAll('.view-detail').forEach(btn => btn.onclick = (e) => { e.stopPropagation(); showProductDetail(btn.dataset.id); });
+        document.querySelectorAll('.product-card').forEach(card => card.onclick = () => showProductDetail(card.dataset.id));
+    }
+
+    function renderStars(rating) {
+        let full = Math.floor(rating);
+        let half = rating % 1 >= 0.5;
+        let stars = '';
+        for(let i=1;i<=5;i++) {
+            if(i <= full) stars += '<i class="fas fa-star"></i>';
+            else if(i === full+1 && half) stars += '<i class="fas fa-star-half-alt"></i>';
+            else stars += '<i class="far fa-star"></i>';
+        }
+        return stars;
+    }
+
+    async function showProductDetail(id) {
+        const snap = await get(ref(db, `products/${id}`));
+        const p = snap.val();
+        if(!p) return;
+        let userRating = 0, userLiked = false;
+        if(currentUser) {
+            const rateSnap = await get(ref(db, `productRatings/${id}/${currentUser.uid}`));
+            if(rateSnap.exists()) userRating = rateSnap.val();
+            const likeSnap = await get(ref(db, `productLikes/${id}/${currentUser.uid}`));
+            if(likeSnap.exists()) userLiked = likeSnap.val() === true;
+        }
+        const modalHtml = `
+            <div class="modal fade" id="detailModal" tabindex="-1">
+                <div class="modal-dialog modal-lg modal-dialog-centered">
+                    <div class="modal-content rounded-4">
+                        <div class="modal-header border-0">
+                            <h5 class="fw-bold">${escapeHtml(p.name)}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <img src="${p.photoUrl || 'https://placehold.co/600x400'}" class="img-fluid rounded-4">
+                                </div>
+                                <div class="col-md-6">
+                                    <h3 class="text-primary">₹${p.price}</h3>
+                                    <div class="rating-stars fs-5">${renderStars(p.avgRating || 0)} (${p.ratingCount || 0})</div>
+                                    <div class="my-2">
+                                        <button class="btn btn-sm" id="likeDetailBtn"><i class="fas fa-heart ${userLiked ? 'text-danger' : 'text-secondary'}"></i> <span id="likeCountDetail">${p.likeCount || 0}</span></button>
+                                    </div>
+                                    <p>${escapeHtml(p.description || 'No description')}</p>
+                                    <p><i class="fas fa-tag"></i> Category: ${p.category || 'General'}</p>
+                                    <div class="rating-input mt-3">
+                                        <label>Rate this product:</label><br>
+                                        <div id="starSelectorDetail" class="d-flex gap-1 mt-1">
+                                            ${[1,2,3,4,5].map(s => `<i class="fas fa-star ${s <= userRating ? 'text-warning' : 'text-secondary'}" data-rate="${s}" style="cursor:pointer; font-size:1.5rem;"></i>`).join('')}
+                                        </div>
+                                    </div>
+                                    <button class="btn btn-primary w-100 mt-4" id="buyNowDetail">Buy Now</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const modalEl = document.getElementById('detailModal');
+        const modal = new bootstrap.Modal(modalEl);
+        modal.show();
+        // Star rating click
+        document.querySelectorAll('#starSelectorDetail .fa-star').forEach(star => {
+            star.onclick = async () => {
+                const rate = parseInt(star.dataset.rate);
+                if(!currentUser) { showDialog("Login Required", "Please login to rate", "info"); return; }
+                await set(ref(db, `productRatings/${id}/${currentUser.uid}`), rate);
+                // update avg rating
+                const allRatings = await get(ref(db, `productRatings/${id}`));
+                let sum=0, count=0;
+                if(allRatings.exists()) {
+                    Object.values(allRatings.val()).forEach(v => { sum+=v; count++; });
+                }
+                const avg = count ? sum/count : 0;
+                await update(ref(db, `products/${id}`), { avgRating: avg, ratingCount: count });
+                showToast("Thanks for rating!");
+                modal.hide(); modalEl.remove(); showProductDetail(id);
+            };
+        });
+        // Like button
+        document.getElementById('likeDetailBtn')?.onclick = async () => {
+            if(!currentUser) { showDialog("Login Required", "Login to like", "info"); return; }
+            const likeRef = ref(db, `productLikes/${id}/${currentUser.uid}`);
+            const snap = await get(likeRef);
+            const newLike = !snap.val();
+            await set(likeRef, newLike);
+            const allLikes = await get(ref(db, `productLikes/${id}`));
+            let likeCount = 0;
+            if(allLikes.exists()) likeCount = Object.values(allLikes.val()).filter(v => v===true).length;
+            await update(ref(db, `products/${id}`), { likeCount });
+            showToast(newLike ? "Liked!" : "Unliked");
+            modal.hide(); modalEl.remove(); showProductDetail(id);
+        };
+        // Buy button
+        document.getElementById('buyNowDetail').onclick = async () => {
+            if(!currentUser) { showDialog("Login Required", "Please login to buy", "error"); return; }
+            const balance = (await get(ref(db, `users/${currentUser.uid}/walletBalance`))).val() || 0;
+            if(balance < p.price) { showDialog("Insufficient Balance", "Please recharge", "error"); return; }
+            const confirm = await Swal.fire({ title: "Confirm Purchase", text: `Buy "${p.name}" for ₹${p.price}?`, icon: "question", showCancelButton: true });
+            if(!confirm.isConfirmed) return;
+            await runTransaction(ref(db, `users/${currentUser.uid}/walletBalance`), (current) => (current || 0) - p.price);
+            const orderId = push(ref(db, 'orders')).key;
+            await set(ref(db, `orders/${orderId}`), {
+                userId: currentUser.uid, productId: id, productName: p.name, productPrice: p.price, fileUrl: p.fileUrl || "#", purchasedAt: Date.now()
+            });
+            showToast("Purchase successful! Go to My Orders.");
+            modal.hide(); modalEl.remove();
+            if(document.getElementById("ordersTab")?.classList.contains("active")) loadMyOrders();
+        };
+        modalEl.addEventListener('hidden.bs.modal', () => modalEl.remove());
+    }
+
+    async function loadMyOrders() {
+        if(!currentUser) return;
+        const ordersSnap = await get(ref(db, 'orders'));
+        let orders = [];
+        if(ordersSnap.exists()) {
+            Object.entries(ordersSnap.val()).forEach(([id, o]) => { if(o.userId === currentUser.uid) orders.push({ id, ...o }); });
+        }
+        orders.sort((a,b) => b.purchasedAt - a.purchasedAt);
+        const container = document.getElementById("ordersContainer");
+        if(!container) return;
+        if(orders.length === 0) { container.innerHTML = `<div class="text-center py-5">No orders yet.</div>`; return; }
+        container.innerHTML = orders.map(o => `
+            <div class="card mb-3 p-3 rounded-4">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div><h6 class="mb-0">${escapeHtml(o.productName)}</h6><small>₹${o.productPrice} • ${new Date(o.purchasedAt).toLocaleString()}</small></div>
+                    ${o.fileUrl && o.fileUrl !== "#" ? `<a href="${o.fileUrl}" class="btn btn-primary btn-sm" download target="_blank"><i class="fas fa-download"></i> Download</a>` : '<span class="text-muted">No file</span>'}
+                </div>
+            </div>
+        `).join('');
+    }
+
+    async function requestRecharge(amount, paymentId) {
+        if(!currentUser || !amount || amount<=0 || !paymentId.trim()) { showToast("Valid amount & payment ID required","error"); return; }
+        await push(ref(db, 'rechargeRequests'), {
+            userId: currentUser.uid, userEmail: currentUser.email, amount: parseFloat(amount), paymentId, status: 'pending', timestamp: Date.now()
+        });
+        showToast("Request sent. Admin will approve.");
+    }
+
+    async function showRechargeModal() {
+        const configSnap = await get(ref(db, 'settings/upiConfig'));
+        const config = configSnap.exists() ? configSnap.val() : { upiId:"admin@upi", qrImageUrl:"", instruction:"Pay to this UPI ID" };
+        const modalHtml = `
+            <div class="modal fade" id="rechargeModal" tabindex="-1">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                        <div class="modal-header"><h5>Recharge Wallet</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                        <div class="modal-body text-center">
+                            ${config.qrImageUrl ? `<img src="${config.qrImageUrl}" style="max-width:150px;" class="mb-3">` : ""}
+                            <div class="bg-light p-3 rounded"><strong>UPI ID:</strong> <span id="upiSpan">${config.upiId}</span> <button class="btn btn-sm btn-outline-secondary copyBtn">Copy</button><br><small>${config.instruction}</small></div>
+                            <input type="number" id="rechargeAmount" class="form-control my-2" placeholder="Amount (₹)">
+                            <input type="text" id="paymentId" class="form-control mb-2" placeholder="Transaction ID">
+                            <button class="btn btn-primary w-100" id="submitRecharge">Submit</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const modalEl = document.getElementById('rechargeModal');
+        const modal = new bootstrap.Modal(modalEl);
+        document.querySelector('.copyBtn')?.addEventListener('click', () => { navigator.clipboard.writeText(config.upiId); showToast("Copied"); });
+        document.getElementById('submitRecharge')?.addEventListener('click', async () => {
+            const amt = document.getElementById('rechargeAmount').value, pid = document.getElementById('paymentId').value;
+            await requestRecharge(amt, pid);
+            modal.hide(); modalEl.remove();
+        });
+        modal.show();
+        modalEl.addEventListener('hidden.bs.modal', () => modalEl.remove());
+    }
+
+    function renderProfileDropdown() {
+        const container = document.getElementById("profileContainer");
+        if(!container) return;
+        container.innerHTML = `
+            <div class="position-relative">
+                <i class="fas fa-user-circle fa-2x" id="profileIcon" style="cursor:pointer;"></i>
+                <div id="profileDropdown" class="dropdown-custom">
+                    <div class="p-3 border-bottom">${currentUser.email}</div>
+                    <div class="p-3 border-bottom">Wallet: <span id="profileWalletBalance">₹0</span></div>
+                    <div class="p-3"><button id="logoutProfile" class="btn btn-danger w-100">Logout</button></div>
+                </div>
+            </div>
+        `;
+        const icon = document.getElementById("profileIcon");
+        const dropdown = document.getElementById("profileDropdown");
+        icon.onclick = (e) => { e.stopPropagation(); dropdown.style.display = dropdown.style.display === 'block' ? 'none' : 'block'; };
+        document.addEventListener('click', () => dropdown.style.display = 'none');
+        document.getElementById("logoutProfile")?.addEventListener("click", logoutUser);
+        attachWalletListener(currentUser.uid);
+    }
+
+    async function requestNotificationPermission() {
+        if(!messaging) { alert("Notification not supported in this browser"); return; }
+        if(Notification.permission === "granted") { showToast("Already granted"); return; }
+        const perm = await Notification.requestPermission();
+        if(perm === "granted") {
+            try {
+                const token = await getToken(messaging);
+                if(token) await set(ref(db, `fcmTokens/${currentUser.uid}`), token);
+                showToast("Notifications enabled");
+            } catch(e) { console.log(e); alert("Error getting token"); }
+        }
+    }
+
+    function listenForRealTimeNotifications() {
+        if(!currentUser) return;
+        const notifRef = query(ref(db, 'notifications'), orderByChild('toUserId'), equalTo(currentUser.uid));
+        onValue(notifRef, (snap) => {
+            const list = document.getElementById("notificationsList");
+            if(!list) return;
+            let items = [];
+            snap.forEach(child => items.push({ id: child.key, ...child.val() }));
+            items.sort((a,b) => b.timestamp - a.timestamp);
+            list.innerHTML = items.map(n => `<div class="border-bottom p-2"><strong>${escapeHtml(n.title||'Message')}</strong><br>${escapeHtml(n.message)}<br><small>${new Date(n.timestamp).toLocaleString()}</small></div>`).join('');
+        });
+    }
+
+    async function renderApp() {
+        if(!currentUser) return renderAuthScreen();
+        const userSnap = await get(ref(db, `users/${currentUser.uid}`));
+        if(userSnap.val()?.banned) { showDialog("Banned", "Your account is banned.", "error"); logoutUser(); return; }
+        if(userSnap.val()?.role === "admin") { showDialog("Admin", "Use admin panel at /admin.html", "info"); logoutUser(); return; }
+
+        document.getElementById("app").innerHTML = `
+            <nav class="navbar d-flex justify-content-between align-items-center">
+                <div class="logo"><i class="fas fa-store"></i> Premium FileStore</div>
+                <div class="d-flex gap-3 align-items-center">
+                    <div class="wallet-badge"><i class="fas fa-wallet"></i> <span id="walletBalanceDisplay">₹0</span></div>
+                    <div id="profileContainer"></div>
+                </div>
+            </nav>
+            <div class="container mt-4">
+                <ul class="nav nav-tabs justify-content-center mb-4">
+                    <li class="nav-item"><button class="nav-link active" id="tabProductsBtn">📱 Explore</button></li>
+                    <li class="nav-item"><button class="nav-link" id="tabOrdersBtn">📥 My Orders</button></li>
+                    <li class="nav-item"><button class="nav-link" id="tabWalletBtn">💰 Wallet</button></li>
+                    <li class="nav-item"><button class="nav-link" id="tabNotifBtn">🔔 Notifications</button></li>
+                </ul>
+                <div id="tabContent"></div>
+            </div>
+            <div class="toast-notif" id="pushToast"></div>
+        `;
+        renderProfileDropdown();
+        attachWalletListener(currentUser.uid);
+        listenForRealTimeNotifications();
+
+        // Tab switching
+        const showTab = async (tab) => {
+            const content = document.getElementById("tabContent");
+            if(tab === 'products') {
+                content.innerHTML = `<div class="row" id="productsContainer"></div>`;
+                await loadProducts();
+            } else if(tab === 'orders') {
+                content.innerHTML = `<div id="ordersContainer"></div>`;
+                await loadMyOrders();
+            } else if(tab === 'wallet') {
+                const bal = (await get(ref(db, `users/${currentUser.uid}/walletBalance`))).val() || 0;
+                content.innerHTML = `
+                    <div class="card p-5 text-center rounded-4">
+                        <h3>Your Balance</h3>
+                        <h2 class="text-primary display-4" id="walletBalanceLarge">₹${bal}</h2>
+                        <button class="btn btn-primary btn-lg mt-3" id="rechargeBtn">Recharge Now</button>
+                    </div>
+                `;
+                document.getElementById("rechargeBtn").onclick = showRechargeModal;
+            } else if(tab === 'notifications') {
+                content.innerHTML = `<div class="card p-4 rounded-4"><h5>Recent Notifications</h5><div id="notificationsList"></div></div>`;
+                listenForRealTimeNotifications();
+            }
+        };
+        document.getElementById("tabProductsBtn").onclick = () => { activeTab('products'); showTab('products'); };
+        document.getElementById("tabOrdersBtn").onclick = () => { activeTab('orders'); showTab('orders'); };
+        document.getElementById("tabWalletBtn").onclick = () => { activeTab('wallet'); showTab('wallet'); };
+        document.getElementById("tabNotifBtn").onclick = () => { activeTab('notifications'); showTab('notifications'); };
+        function activeTab(tab) {
+            [document.getElementById("tabProductsBtn"), document.getElementById("tabOrdersBtn"), document.getElementById("tabWalletBtn"), document.getElementById("tabNotifBtn")].forEach(btn => btn.classList.remove("active"));
+            if(tab === 'products') document.getElementById("tabProductsBtn").classList.add("active");
+            else if(tab === 'orders') document.getElementById("tabOrdersBtn").classList.add("active");
+            else if(tab === 'wallet') document.getElementById("tabWalletBtn").classList.add("active");
+            else if(tab === 'notifications') document.getElementById("tabNotifBtn").classList.add("active");
+        }
+        await showTab('products');
+
+        // Ask for notification permission after login
+        setTimeout(() => {
+            if(Notification.permission !== "granted") {
+                Swal.fire({ title: "Get Notifications", text: "Allow to receive updates on new products?", icon: "info", showCancelButton: true }).then(res => {
+                    if(res.isConfirmed) requestNotificationPermission();
+                });
+            } else requestNotificationPermission();
+        }, 1000);
+        if(messaging) onMessage(messaging, (payload) => { const toast = document.getElementById("pushToast"); toast.innerText = payload.notification.title + ": " + payload.notification.body; toast.style.display = "block"; setTimeout(() => toast.style.display = "none", 4000); });
+    }
+
+    function renderAuthScreen() {
+        document.getElementById("app").innerHTML = `
+            <div class="d-flex justify-content-center align-items-center vh-100">
+                <div class="card p-5 text-center" style="width: 420px;">
+                    <h3 class="mb-3 logo">Premium FileStore</h3>
+                    <ul class="nav nav-pills justify-content-center mb-3">
+                        <li class="nav-item"><button class="nav-link active" id="loginTab">Login</button></li>
+                        <li class="nav-item"><button class="nav-link" id="registerTab">Register</button></li>
+                    </ul>
+                    <div id="authForm"></div>
+                </div>
+            </div>
+        `;
+        const loginForm = () => { document.getElementById("authForm").innerHTML = `<input id="email" class="form-control mb-2" placeholder="Email"><input id="password" class="form-control mb-2" type="password" placeholder="Password"><button id="loginBtn" class="btn btn-primary w-100">Login</button>`; document.getElementById("loginBtn").onclick = () => handleLogin(document.getElementById("email").value, document.getElementById("password").value); };
+        const registerForm = () => { document.getElementById("authForm").innerHTML = `<input id="email" class="form-control mb-2" placeholder="Email"><input id="password" class="form-control mb-2" type="password" placeholder="Password"><button id="regBtn" class="btn btn-primary w-100">Register</button>`; document.getElementById("regBtn").onclick = () => handleRegister(document.getElementById("email").value, document.getElementById("password").value); };
+        document.getElementById("loginTab").onclick = () => { document.getElementById("loginTab").classList.add("active"); document.getElementById("registerTab").classList.remove("active"); loginForm(); };
+        document.getElementById("registerTab").onclick = () => { document.getElementById("registerTab").classList.add("active"); document.getElementById("loginTab").classList.remove("active"); registerForm(); };
+        loginForm();
+    }
+
+    function escapeHtml(str) { if(!str) return ''; return str.replace(/[&<>]/g, m => m==='&'?'&amp;':m==='<'?'&lt;':'&gt;'); }
+
+    // Start
+    onAuthStateChanged(auth, (user) => { currentUser = user; if(user) renderApp(); else renderAuthScreen(); });
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
